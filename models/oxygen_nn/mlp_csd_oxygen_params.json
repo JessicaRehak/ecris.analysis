@@ -1,0 +1,15 @@
+{
+  "mlp__activation": "relu",
+  "mlp__alpha": 0.0001,
+  "mlp__batch_size": 32,
+  "mlp__hidden_layer_sizes": [
+    30,
+    15,
+    7
+  ],
+  "mlp__learning_rate": "constant",
+  "mlp__learning_rate_init": 0.01,
+  "mlp__n_iter_no_change": 10,
+  "mlp__solver": "adam",
+  "mlp__validation_fraction": 0.2
+}
