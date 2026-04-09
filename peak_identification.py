@@ -131,21 +131,38 @@ persistent_elements = [
 # 2. Ask the user for any elements they know are present
 print("Current persistent elements: O, N, C")
 known_elements_input = input(
-    "Enter any additional known element symbols (comma-separated, e.g., 'Cl,Ar', or empty to skip): "
+    "Enter any additional known element symbols (e.g., 'Cl,Ar', or with mass 'O-18', or empty to skip): "
 )
 known_symbols = [s.strip() for s in known_elements_input.split(",") if s.strip()]
 
-for symbol in known_symbols:
-    matches = isotopes[isotopes["s"] == symbol]
+for item in known_symbols:
+    if "-" in item:
+        parts = item.split("-")
+        symbol = parts[0]
+        try:
+            mass_num = int(parts[1])
+            matches = isotopes[(isotopes["s"] == symbol) & (isotopes.index == mass_num)]
+        except (ValueError, IndexError):
+            print(f"Warning: Invalid format or mass number for '{item}'.")
+            continue
+    else:
+        symbol = item
+        matches = isotopes[isotopes["s"] == symbol]
+
     if matches.empty:
-        print(f"Warning: Symbol '{symbol}' not found in isotopes data.")
+        print(f"Warning: Symbol '{item}' not found in isotopes data.")
         continue
-    # Find most abundant
-    abundance_values = matches["a"].to_numpy()
+
+    # Find most abundant among matches
+    abundance_values = np.array(matches["a"])
     max_idx = int(abundance_values.argmax())
     most_abundant = matches.iloc[max_idx]
     persistent_elements.append(
-        {"name": symbol, "z": int(most_abundant["z"]), "m": int(np.round(most_abundant["m"]))}
+        {
+            "name": str(most_abundant["s"]),
+            "z": int(most_abundant["z"]),
+            "m": int(np.round(float(cast(Any, most_abundant["m"])))),
+        }
     )
 
 # 3. Find initial identified peaks
@@ -171,6 +188,7 @@ for elem in persistent_elements:
 
 
 def refresh_plot(csd, identified_evals, candidate_eval=None):
+    plt.close("all")  # Ensure only one plot is open
     clear_output(wait=True)
     fig, ax = make_plot(r"$m/q$", r"$I (\mu A)$")
     if csd.m_over_q is not None and csd.beam_current is not None:
@@ -256,7 +274,7 @@ while True:
         input("Press Enter to continue...")
         continue
 
-    candidates.sort(key=lambda x: x.a, reverse=True)
+    candidates.sort(key=lambda x: (len(x.peak_indices), x.a), reverse=True)
 
     idx = 0
     while idx < len(candidates):
