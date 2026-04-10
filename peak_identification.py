@@ -275,6 +275,10 @@ while True:
             (isotopes["m"] > target_mass - 0.5) & (isotopes["m"] < target_mass + 0.5)
         ]
         for _, isotope in matches.iterrows():
+            z_val = int(cast(Any, isotope["z"]))
+            if charge > z_val:
+                continue  # Skip non-physical candidates (charge > atomic number)
+
             found_peaks = find_element_peaks(peaks, csd, isotope["m"])
             if len(found_peaks) > 0:
                 if any(
