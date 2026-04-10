@@ -187,7 +187,7 @@ for elem in persistent_elements:
         isotopes_to_exclude.append((elem["z"], elem["m"]))
 
 
-def refresh_plot(csd, identified_evals, candidate_eval=None):
+def refresh_plot(csd, identified_evals, candidate_eval=None, highlight_label=None):
     plt.close("all")  # Ensure only one plot is open
     clear_output(wait=True)
     fig, ax = make_plot(r"$m/q$", r"$I (\mu A)$")
@@ -198,12 +198,13 @@ def refresh_plot(csd, identified_evals, candidate_eval=None):
         ax.plot(ev.m_over_q, ev.current, "x", label=ev.symbol())
 
     if candidate_eval:
+        label = highlight_label if highlight_label else f"CANDIDATE: {candidate_eval.symbol()}"
         ax.plot(
             candidate_eval.m_over_q,
             candidate_eval.current,
             "v",
             markersize=10,
-            label=f"CANDIDATE: {candidate_eval.symbol()}",
+            label=label,
         )
 
     ax.legend()
@@ -233,9 +234,41 @@ while True:
         print("Invalid input. Please enter a number.")
         continue
 
+    # Verification step
+    peak_mqs = csd.m_over_q[peaks] if csd.m_over_q is not None else np.array([])
+    if len(peak_mqs) > 0:
+        nearest_idx = peaks[np.argmin(np.abs(peak_mqs - target_mq))]
+        peak_mq = float(csd.m_over_q[nearest_idx]) if csd.m_over_q is not None else 0.0
+        peak_current = (
+            float(csd.beam_current[nearest_idx]) if csd.beam_current is not None else 0.0
+        )
+
+        # Show target marker
+        verify_ev = ElementEvaluation(
+            "TARGET",
+            0,
+            0,
+            0.0,
+            np.array([peak_mq]),
+            np.array([peak_current]),
+            np.array([int(nearest_idx)]),
+        )
+        refresh_plot(csd, identified_evaluations, verify_ev, highlight_label="TARGET PEAK")
+
+        ans = (
+            input(f"Investigate peak at m/q = {peak_mq:.3f}? (y: yes, n: no/retry, q: quit): ")
+            .strip()
+            .lower()
+        )
+        if ans == "n":
+            continue
+        if ans == "q":
+            break
+        target_mq = peak_mq  # Use actual peak m/q for candidate matching
+
     # Find candidates near this m/q
     candidates = []
-    for charge in range(1, 21):
+    for charge in range(1, 31):  # Search up to q=30
         target_mass = target_mq * charge
         # Find isotopes with mass near target_mass
         matches = isotopes[
