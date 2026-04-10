@@ -295,6 +295,7 @@ while True:
 
     # Verification step
     suggested_candidates = []
+    nearest_idx = None
     peak_mqs = csd.m_over_q[peaks] if csd.m_over_q is not None else np.array([])
     if len(peak_mqs) > 0:
         nearest_idx = peaks[np.argmin(np.abs(peak_mqs - target_mq))]
@@ -325,7 +326,6 @@ while True:
             "  [bold]symbol[/] : Enter a symbol manually (e.g., 'Ar-40')\n",
             default="y",
         ).lower()
-
         console.print()
 
         if ans == "n":
@@ -341,7 +341,8 @@ while True:
                 best_q = int(np.round(mass / peak_mq))
                 if 1 <= best_q <= int(cast(Any, isotope["z"])):
                     ev = create_evaluation(isotope, csd, peaks)
-                    suggested_candidates.append(ev)
+                    if nearest_idx in ev.peak_indices:
+                        suggested_candidates.append(ev)
 
         target_mq = peak_mq  # Use actual peak m/q for candidate matching
 
@@ -359,15 +360,11 @@ while True:
                 continue  # Skip non-physical candidates (charge > atomic number)
 
             found_peaks = find_element_peaks(peaks, csd, isotope["m"])
-            if len(found_peaks) > 0:
-                if any(
-                    np.abs(csd.m_over_q[p] - target_mq) < 0.2
-                    for p in found_peaks
-                    if csd.m_over_q is not None
-                ):
-                    ev = create_evaluation(isotope, csd, peaks)
-                    if not any(c.symbol() == ev.symbol() for c in candidates):
-                        candidates.append(ev)
+            # Ensure the targeted peak is among the found peaks for this isotope
+            if nearest_idx is not None and nearest_idx in found_peaks:
+                ev = create_evaluation(isotope, csd, peaks)
+                if not any(c.symbol() == ev.symbol() for c in candidates):
+                    candidates.append(ev)
 
     if not candidates and not suggested_candidates:
         console.print(f"[bold yellow]No candidates found for m/q {target_mq}.[/]")
