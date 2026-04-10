@@ -7,6 +7,13 @@ from ops.ecris.analysis.csd.m_over_q import estimate_m_over_q
 from ops.ecris.analysis.model.element import Element
 import pandas as pd
 from IPython.display import clear_output
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
+from rich import print as rprint
+
+console = Console()
 
 isotopes = pd.read_csv("./data/IsotopeData.txt", delimiter="\\s+", names=["s", "z", "a", "m"])
 
@@ -172,17 +179,28 @@ persistent_elements = [
 ]
 
 # 2. Ask the user for any elements they know are present
-print("Current persistent elements: O, N, C")
-known_elements_input = input(
-    "Enter any additional known element symbols (e.g., 'Cl,Ar', or with mass 'O-18', or empty to skip): "
+console.print()
+console.print(Panel("[bold cyan]INITIAL SETUP: IDENTIFIED ELEMENTS[/]", expand=False))
+console.print(f"Current persistent elements: [bold green]O, N, C[/]")
+console.print()
+
+known_elements_input = Prompt.ask(
+    "Enter any [bold cyan]additional known element symbols[/]\n"
+    "  (e.g., 'Cl,Ar', or with mass 'O-18')\n"
+    "  [dim](leave empty to skip)[/]",
+    default="",
 )
+console.print()
+
 known_symbols = [s.strip() for s in known_elements_input.split(",") if s.strip()]
 
 for item in known_symbols:
     matches = lookup_isotopes(item, isotopes)
 
     if matches.empty:
-        print(f"Warning: Symbol '{item}' not found in isotopes data.")
+        console.print(
+            f"[bold red]Warning:[/] Symbol/Isotope '[bold white]{item}[/]' not found in isotopes data."
+        )
         continue
 
     # Find most abundant among matches
@@ -250,14 +268,22 @@ no_evaluations = []
 mq_input = ""
 while True:
     refresh_plot(csd, identified_evaluations)
-    mq_input = (
-        input("\nEnter m/q to investigate (or 'f' for final evaluation, 'q' to quit): ")
-        .strip()
-        .lower()
-    )
+
+    console.print()
+    console.print(Panel("[bold yellow]PEAK INVESTIGATION LOOP[/]", expand=False))
+    console.print("[dim](Enter an m/q value to search for matching isotopes)[/]")
+    console.print()
+
+    mq_input = Prompt.ask(
+        "Enter [bold yellow]m/q[/] value\n  [cyan]f[/] : Final evaluation\n  [red]q[/] : Quit\n",
+        default="f",
+    ).lower()
 
     if mq_input == "q":
         break
+    if mq_input == "f":
+        break
+
     if mq_input == "f":
         break
 
@@ -289,13 +315,19 @@ while True:
         )
         refresh_plot(csd, identified_evaluations, verify_ev, highlight_label="TARGET PEAK")
 
-        ans = (
-            input(
-                f"Investigate peak at m/q = {peak_mq:.3f}? (y: yes, n: no/retry, q: quit, or enter symbol like 'Ar-40'): "
-            )
-            .strip()
-            .lower()
-        )
+        console.print()
+        console.print(f"Targeting: [bold magenta]m/q = {peak_mq:.3f}[/]")
+        ans = Prompt.ask(
+            "Is this the peak you want to investigate?\n"
+            "  [bold]y[/] : Yes, search for isotopes\n"
+            "  [bold]n[/] : No, retry m/q entry\n"
+            "  [bold]q[/] : Quit\n"
+            "  [bold]symbol[/] : Enter a symbol manually (e.g., 'Ar-40')\n",
+            default="y",
+        ).lower()
+
+        console.print()
+
         if ans == "n":
             continue
         if ans == "q":
@@ -338,8 +370,8 @@ while True:
                         candidates.append(ev)
 
     if not candidates and not suggested_candidates:
-        print(f"No candidates found for m/q {target_mq}.")
-        input("Press Enter to continue...")
+        console.print(f"[bold yellow]No candidates found for m/q {target_mq}.[/]")
+        Prompt.ask("Press Enter to continue")
         continue
 
     # Prioritize suggested candidates and sort the rest
@@ -356,14 +388,26 @@ while True:
     while idx < len(final_candidates):
         cand = final_candidates[idx]
         refresh_plot(csd, identified_evaluations, cand)
-        print(f"\nInvestigating m/q {target_mq}: {len(final_candidates)} candidates found.")
-        ans = (
-            input(
-                f"Candidate {idx + 1}/{len(final_candidates)}: Accept {cand.symbol()}? (y: yes, n: no, m: maybe, e: end, s: skip): "
+
+        console.print()
+        console.print(
+            Panel(
+                f"[bold cyan]INVESTIGATING m/q {target_mq:.3f}[/]\n"
+                f"Candidate [bold]{idx + 1}/{len(final_candidates)}[/]: [bold green]{cand.symbol()}[/]",
+                expand=False,
             )
-            .strip()
-            .lower()
         )
+
+        console.print(
+            f"  [bold]y[/] : Accept {cand.symbol()}\n"
+            f"  [bold]n[/] : Reject (don't show again)\n"
+            f"  [bold]m[/] : Maybe (save for final selection)\n"
+            f"  [bold]s[/] : Skip (show next candidate)\n"
+            f"  [bold]e[/] : End (stop searching for this peak)\n"
+        )
+
+        ans = Prompt.ask("Action", choices=["y", "n", "m", "e", "s"], default="y").lower()
+        console.print()
 
         if ans == "y":
             identified_peak_indices.update(cand.peak_indices)
@@ -385,36 +429,48 @@ while True:
 # 5. Final evaluation review
 if mq_input != "q":
     clear_output(wait=True)
-    print("Final Evaluation Review")
-    print("-----------------------")
+    console.print(Panel("[bold green]Final Evaluation Review[/]"))
+
     all_options = identified_evaluations + maybe_evaluations
     unique_options = {ev.symbol(): ev for ev in all_options}.values()
 
     final_selections = []
     options_list = list(unique_options)
     if options_list:
-        print("Select elements to include in final evaluation (comma-separated indices):")
+        table = Table(title="Candidates for Final Selection")
+        table.add_column("Index", style="cyan", justify="right")
+        table.add_column("Symbol", style="bold green")
+        table.add_column("Score", style="magenta", justify="right")
+        table.add_column("Abundance (%)", style="yellow", justify="right")
+        table.add_column("Status", style="blue")
+
+        max_mq = float(csd.m_over_q.max()) if csd.m_over_q is not None else 0.0
         for i, ev in enumerate(options_list):
             status = "Identified" if ev in identified_evaluations else "Maybe"
-            print(f"{i}: {ev.symbol()} (Abundance: {ev.a:.1f}%, Status: {status})")
+            table.add_row(str(i), ev.symbol(), f"{ev.score(max_mq):.2f}", f"{ev.a:.1f}", status)
 
-        sel_input = input("Selections (empty for defaults): ").strip()
+        console.print(table)
+
+        sel_input = Prompt.ask(
+            "Select elements to include in final evaluation ([bold cyan]comma-separated indices[/] or [bold white]empty for defaults[/])",
+            default="",
+        )
         if sel_input:
             try:
                 indices = [int(x.strip()) for x in sel_input.split(",") if x.strip().isdigit()]
                 final_selections = [options_list[i] for i in indices if 0 <= i < len(options_list)]
             except (ValueError, IndexError):
-                print("Invalid selections, using current identified list.")
+                console.print("[red]Invalid selections, using current identified list.[/]")
                 final_selections = identified_evaluations
         else:
             final_selections = identified_evaluations
     else:
         final_selections = identified_evaluations
 
-    print("\nFinal Elements for Evaluation:")
+    console.print(Panel("[bold green]Final Elements for Evaluation[/]"))
     for ev in final_selections:
-        print(f"- {ev.symbol()} (Mass: {ev.m}, Z: {ev.z})")
+        console.print(f"  • [bold green]{ev.symbol()}[/] (Mass: {ev.m}, Z: {ev.z})")
 
     refresh_plot(csd, final_selections)
-    print("\nEvaluation complete.")
+    console.print("\n[bold green]Evaluation complete.[/]")
     plt.show(block=True)
