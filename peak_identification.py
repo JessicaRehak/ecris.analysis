@@ -77,6 +77,18 @@ class ElementEvaluation:
     def symbol(self):
         return f"{self.s}-{self.m}"
 
+    def score(self, max_mq):
+        # Calculate how many peaks we expect to see for this isotope
+        # We expect one peak for each charge q from 1 to z, provided m/q is within the measured range
+        expected_qs = [self.m / q for q in range(1, self.z + 1)]
+        expected_count = len([mq for mq in expected_qs if mq <= max_mq])
+
+        if expected_count == 0:
+            return 0.0
+
+        # Score is the fraction of expected peaks that were actually found
+        return len(self.peak_indices) / expected_count
+
 
 def lookup_isotopes(query: str, isotopes_df: pd.DataFrame) -> Any:
     """Lookup isotopes for a given query like 'Ar' or 'Ar-40'."""
@@ -109,7 +121,7 @@ def create_evaluation(isotope: Any, csd: Any, peaks: np.ndarray) -> ElementEvalu
     )
 
 
-def get_evals(peaks, csd, isotopes_to_exclude, identified_peak_indices, min_abundance=25):
+def get_evals(peaks, csd, isotopes_to_exclude, identified_peak_indices, min_abundance=1):
     evaluations = []
     excluded_z = [v[0] for v in isotopes_to_exclude]
     excluded_m = [v[1] for v in isotopes_to_exclude]
@@ -148,7 +160,7 @@ from scipy.signal import find_peaks
 
 # Find all peaks
 if csd.beam_current is not None:
-    peaks = find_peaks(csd.beam_current.clip(5))[0]
+    peaks = find_peaks(csd.beam_current.clip(2))[0]
 else:
     peaks = np.array([], dtype=int)
 
@@ -234,6 +246,7 @@ def refresh_plot(csd, identified_evals, candidate_eval=None, highlight_label=Non
 
 # 4. Interactive identification loop
 maybe_evaluations = []
+no_evaluations = []
 mq_input = ""
 while True:
     refresh_plot(csd, identified_evaluations)
@@ -330,7 +343,8 @@ while True:
         continue
 
     # Prioritize suggested candidates and sort the rest
-    candidates.sort(key=lambda x: (len(x.peak_indices), x.a), reverse=True)
+    max_mq = float(csd.m_over_q.max()) if csd.m_over_q is not None else 0.0
+    candidates.sort(key=lambda x: (x.score(max_mq), x.a), reverse=True)
 
     # Merge suggested and found candidates, removing duplicates
     final_candidates = suggested_candidates.copy()
@@ -342,8 +356,11 @@ while True:
     while idx < len(final_candidates):
         cand = final_candidates[idx]
         refresh_plot(csd, identified_evaluations, cand)
+        print(f"\nInvestigating m/q {target_mq}: {len(final_candidates)} candidates found.")
         ans = (
-            input(f"Accept {cand.symbol()}? (y: yes, n: no, m: maybe, s: skip/next): ")
+            input(
+                f"Candidate {idx + 1}/{len(final_candidates)}: Accept {cand.symbol()}? (y: yes, n: no, m: maybe, e: end, s: skip): "
+            )
             .strip()
             .lower()
         )
@@ -352,15 +369,18 @@ while True:
             identified_peak_indices.update(cand.peak_indices)
             identified_evaluations.append(cand)
             break
+        elif ans == "e":
+            break
         elif ans == "m":
             maybe_evaluations.append(cand)
-            break
+            idx += 1
         elif ans == "n":
+            no_evaluations.append(cand)
             idx += 1
         elif ans == "s":
             idx += 1
         else:
-            print("Invalid input. Use y/n/m/s.")
+            print("Invalid input. Use y/n/m/e/s.")
 
 # 5. Final evaluation review
 if mq_input != "q":
