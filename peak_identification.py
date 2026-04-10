@@ -1,74 +1,21 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
-from ops.ecris.analysis.io import read_csd_from_file_pair
-from ops.ecris.analysis.csd.polynomial_fit import polynomial_fit_mq
-from ops.ecris.analysis.csd.m_over_q import estimate_m_over_q
-from ops.ecris.analysis.model.element import Element
 import pandas as pd
+from pathlib import Path
+from typing import Any, List, Set, cast, Dict, Optional, Tuple
+from dataclasses import dataclass
+from scipy.signal import find_peaks
 from IPython.display import clear_output
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from rich import print as rprint
+from rich.prompt import Prompt
+
+# Assuming these are available in the environment/package
+from ops.ecris.analysis.csd.polynomial_fit import polynomial_fit_mq
+from ops.ecris.analysis.model.element import Element
 
 console = Console()
-
-isotopes = pd.read_csv("./data/IsotopeData.txt", delimiter="\\s+", names=["s", "z", "a", "m"])
-
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-    }
-)
-plt.ion()
-
-
-def make_plot(x_label, y_label):
-    fig = plt.figure(figsize=(9, 6))
-    ax = plt.gca()
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    plt.xlabel(x_label)
-    plt.ylabel(y_label)
-    plt.grid(alpha=0.5, ls="--")
-    return fig, ax
-
-
-csd_path = Path("/home/work/repos/ops/ecris.analysis/data/csds/csd_1762894074")
-print(f"{csd_path.exists()=}")
-
-csd = read_csd_from_file_pair(csd_path)
-csd.m_over_q, solution = polynomial_fit_mq(
-    csd,
-    [Element("O", "Oxygen", 16, 8)],
-    polynomial_order=4,
-    always_optimize=True,
-    nonlinear_bounds=(-1e-2, 1e-2),
-)
-mq = csd.m_over_q
-bc = csd.beam_current
-if mq is not None and bc is not None:
-    plt.plot(mq, bc)
-plt.grid()
-
-
-def find_element_peaks(peaks, csd, m):
-    # Identify which peaks match potential m/q values
-    peaks = np.array(peaks)
-    if csd.m_over_q is None:
-        return np.array([], dtype=int)
-
-    mq_measured = csd.m_over_q[peaks]
-    charge = m / mq_measured
-    # Check if charge is close to an integer
-    peak_mask = ~(((charge % 1) > 0.05) & ((charge % 1) < 0.95))
-    return peaks[peak_mask]
-
-
-from dataclasses import dataclass
-from typing import Any, List, Set, cast
 
 
 @dataclass
@@ -84,7 +31,7 @@ class ElementEvaluation:
     def symbol(self):
         return f"{self.s}-{self.m}"
 
-    def score(self, max_mq):
+    def score(self, max_mq: float) -> float:
         # Calculate how many peaks we expect to see for this isotope
         # We expect one peak for each charge q from 1 to z, provided m/q is within the measured range
         expected_qs = [self.m / q for q in range(1, self.z + 1)]
@@ -95,6 +42,18 @@ class ElementEvaluation:
 
         # Score is the fraction of expected peaks that were actually found
         return len(self.peak_indices) / expected_count
+
+
+def find_element_peaks(peaks: np.ndarray, csd: Any, m: float) -> np.ndarray:
+    """Identify which peaks match potential m/q values for a given mass."""
+    if csd.m_over_q is None:
+        return np.array([], dtype=int)
+
+    mq_measured = csd.m_over_q[peaks]
+    charge = m / mq_measured
+    # Check if charge is close to an integer
+    peak_mask = ~(((charge % 1) > 0.05) & ((charge % 1) < 0.95))
+    return peaks[peak_mask]
 
 
 def lookup_isotopes(query: str, isotopes_df: pd.DataFrame) -> Any:
@@ -128,183 +87,156 @@ def create_evaluation(isotope: Any, csd: Any, peaks: np.ndarray) -> ElementEvalu
     )
 
 
-def get_evals(peaks, csd, isotopes_to_exclude, identified_peak_indices, min_abundance=1):
-    evaluations = []
-    excluded_z = [v[0] for v in isotopes_to_exclude]
-    excluded_m = [v[1] for v in isotopes_to_exclude]
+def make_plot(x_label: str, y_label: str):
+    """Create a standard CSD plot axis."""
+    fig = plt.figure(figsize=(9, 6))
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.grid(alpha=0.5, ls="--")
+    return fig, ax
 
-    # Filter isotopes by abundance
-    candidate_isotopes = isotopes[isotopes["a"] > min_abundance]
 
-    for _, isotope in candidate_isotopes.iterrows():
-        s, m, z, a = isotope.s, int(np.round(isotope.m)), isotope.z, isotope.a
-        if z in excluded_z and m in excluded_m:
-            continue
-
-        found_peaks = find_element_peaks(peaks, csd, m)
-        if len(found_peaks) == 0:
-            continue
-
-        # If all found peaks are already identified, skip unless it's a known persistent element
-        if all(p in identified_peak_indices for p in found_peaks):
-            continue
-
-        evaluations.append(
-            ElementEvaluation(
-                s,
-                m,
-                z,
-                a,
-                csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
-                csd.beam_current[found_peaks] if csd.beam_current is not None else np.array([]),
-                found_peaks,
+class PeakIdentifier:
+    def __init__(self, csd: Any, isotopes_df: Optional[pd.DataFrame] = None):
+        self.csd = csd
+        if isotopes_df is None:
+            self.isotopes = pd.read_csv(
+                "./data/IsotopeData.txt", delimiter="\\s+", names=["s", "z", "a", "m"]
             )
+        else:
+            self.isotopes = isotopes_df
+
+        self.peaks = self._find_peaks()
+        self.identified_evaluations: List[ElementEvaluation] = []
+        self.maybe_evaluations: List[ElementEvaluation] = []
+        self.no_evaluations: List[ElementEvaluation] = []
+        self.identified_peak_indices: Set[int] = set()
+
+    def _find_peaks(self) -> np.ndarray:
+        if self.csd.beam_current is not None:
+            return find_peaks(self.csd.beam_current.clip(2))[0]
+        return np.array([], dtype=int)
+
+    def refresh_plot(
+        self,
+        candidate_eval: Optional[ElementEvaluation] = None,
+        highlight_label: Optional[str] = None,
+    ):
+        plt.close("all")
+        clear_output(wait=True)
+        fig, ax = make_plot(r"$m/q$", r"$I (\mu A)$")
+
+        if self.csd.m_over_q is not None and self.csd.beam_current is not None:
+            ax.plot(self.csd.m_over_q, self.csd.beam_current, "--", color="gray", alpha=0.5)
+
+        for ev in self.identified_evaluations:
+            ax.plot(ev.m_over_q, ev.current, "x", label=ev.symbol())
+
+        if candidate_eval:
+            label = highlight_label if highlight_label else f"CANDIDATE: {candidate_eval.symbol()}"
+            ax.plot(
+                candidate_eval.m_over_q, candidate_eval.current, "v", markersize=10, label=label
+            )
+
+        ax.legend()
+        plt.draw()
+        plt.pause(0.1)
+
+    def setup_persistent_elements(self, default_symbols: List[str] = ["O", "N", "C"]):
+        console.print()
+        console.print(Panel("[bold cyan]INITIAL SETUP: IDENTIFIED ELEMENTS[/]", expand=False))
+        console.print(f"Default persistent elements: [bold green]{', '.join(default_symbols)}[/]")
+        console.print()
+
+        known_elements_input = Prompt.ask(
+            "Enter any [bold cyan]additional known element symbols[/]\n"
+            "  (e.g., 'Cl,Ar', or with mass 'O-18')\n"
+            "  [dim](leave empty to skip)[/]",
+            default="",
         )
-    return evaluations
+        console.print()
 
+        symbols_to_process = default_symbols + [
+            s.strip() for s in known_elements_input.split(",") if s.strip()
+        ]
 
-from scipy.signal import find_peaks
+        persistent_elements = []
+        for item in symbols_to_process:
+            matches = lookup_isotopes(item, self.isotopes)
+            if matches.empty:
+                console.print(
+                    f"[bold red]Warning:[/] Symbol/Isotope '[bold white]{item}[/]' not found."
+                )
+                continue
 
-# Find all peaks
-if csd.beam_current is not None:
-    peaks = find_peaks(csd.beam_current.clip(2))[0]
-else:
-    peaks = np.array([], dtype=int)
+            most_abundant = matches.iloc[matches["a"].to_numpy().argmax()]
+            persistent_elements.append(
+                {
+                    "name": str(most_abundant["s"]),
+                    "z": int(most_abundant["z"]),
+                    "m": int(np.round(float(cast(Any, most_abundant["m"])))),
+                }
+            )
 
-# 1. Finds O, N, C peaks
-persistent_elements = [
-    {"name": "O", "z": 8, "m": 16},
-    {"name": "N", "z": 7, "m": 14},
-    {"name": "C", "z": 6, "m": 12},
-]
+        for elem in persistent_elements:
+            found_peaks = find_element_peaks(self.peaks, self.csd, elem["m"])
+            if len(found_peaks) > 0:
+                self.identified_peak_indices.update(found_peaks)
+                ev = ElementEvaluation(
+                    str(elem["name"]),
+                    int(elem["m"]),
+                    int(elem["z"]),
+                    100.0,
+                    self.csd.m_over_q[found_peaks]
+                    if self.csd.m_over_q is not None
+                    else np.array([]),
+                    self.csd.beam_current[found_peaks]
+                    if self.csd.beam_current is not None
+                    else np.array([]),
+                    found_peaks,
+                )
+                self.identified_evaluations.append(ev)
 
-# 2. Ask the user for any elements they know are present
-console.print()
-console.print(Panel("[bold cyan]INITIAL SETUP: IDENTIFIED ELEMENTS[/]", expand=False))
-console.print(f"Current persistent elements: [bold green]O, N, C[/]")
-console.print()
+    def run_investigation(self):
+        while True:
+            self.refresh_plot()
+            console.print()
+            console.print(Panel("[bold yellow]PEAK INVESTIGATION LOOP[/]", expand=False))
+            console.print("[dim](Enter an m/q value to search for matching isotopes)[/]")
+            console.print()
 
-known_elements_input = Prompt.ask(
-    "Enter any [bold cyan]additional known element symbols[/]\n"
-    "  (e.g., 'Cl,Ar', or with mass 'O-18')\n"
-    "  [dim](leave empty to skip)[/]",
-    default="",
-)
-console.print()
+            mq_input = Prompt.ask(
+                "Enter [bold yellow]m/q[/] value\n  [cyan]f[/] : Final evaluation\n  [red]q[/] : Quit\n",
+                default="f",
+            ).lower()
 
-known_symbols = [s.strip() for s in known_elements_input.split(",") if s.strip()]
+            if mq_input == "q":
+                return "quit"
+            if mq_input == "f":
+                break
 
-for item in known_symbols:
-    matches = lookup_isotopes(item, isotopes)
+            try:
+                target_mq = float(mq_input)
+            except ValueError:
+                console.print("[red]Invalid input. Please enter a number.[/]")
+                continue
 
-    if matches.empty:
-        console.print(
-            f"[bold red]Warning:[/] Symbol/Isotope '[bold white]{item}[/]' not found in isotopes data."
-        )
-        continue
+            self._investigate_peak(target_mq)
+        return "success"
 
-    # Find most abundant among matches
-    abundance_values = np.array(matches["a"])
-    max_idx = int(abundance_values.argmax())
-    most_abundant = matches.iloc[max_idx]
-    persistent_elements.append(
-        {
-            "name": str(most_abundant["s"]),
-            "z": int(most_abundant["z"]),
-            "m": int(np.round(float(cast(Any, most_abundant["m"])))),
-        }
-    )
+    def _investigate_peak(self, target_mq: float):
+        peak_mqs = self.csd.m_over_q[self.peaks] if self.csd.m_over_q is not None else np.array([])
+        if len(peak_mqs) == 0:
+            return
 
-# 3. Find initial identified peaks
-identified_evaluations = []
-identified_peak_indices = set()
-isotopes_to_exclude = []
+        nearest_idx = self.peaks[np.argmin(np.abs(peak_mqs - target_mq))]
+        peak_mq = float(self.csd.m_over_q[nearest_idx])
+        peak_current = float(self.csd.beam_current[nearest_idx])
 
-for elem in persistent_elements:
-    found_peaks = find_element_peaks(peaks, csd, elem["m"])
-    if len(found_peaks) > 0:
-        identified_peak_indices.update(found_peaks)
-        ev = ElementEvaluation(
-            str(elem["name"]),
-            int(elem["m"]),
-            int(elem["z"]),
-            100.0,
-            csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
-            csd.beam_current[found_peaks] if csd.beam_current is not None else np.array([]),
-            found_peaks,
-        )
-        identified_evaluations.append(ev)
-        isotopes_to_exclude.append((elem["z"], elem["m"]))
-
-
-def refresh_plot(csd, identified_evals, candidate_eval=None, highlight_label=None):
-    plt.close("all")  # Ensure only one plot is open
-    clear_output(wait=True)
-    fig, ax = make_plot(r"$m/q$", r"$I (\mu A)$")
-    if csd.m_over_q is not None and csd.beam_current is not None:
-        ax.plot(csd.m_over_q, csd.beam_current, "--", color="gray", alpha=0.5)
-
-    for ev in identified_evals:
-        ax.plot(ev.m_over_q, ev.current, "x", label=ev.symbol())
-
-    if candidate_eval:
-        label = highlight_label if highlight_label else f"CANDIDATE: {candidate_eval.symbol()}"
-        ax.plot(
-            candidate_eval.m_over_q,
-            candidate_eval.current,
-            "v",
-            markersize=10,
-            label=label,
-        )
-
-    ax.legend()
-    plt.draw()
-    plt.pause(0.1)
-
-
-# 4. Interactive identification loop
-maybe_evaluations = []
-no_evaluations = []
-mq_input = ""
-while True:
-    refresh_plot(csd, identified_evaluations)
-
-    console.print()
-    console.print(Panel("[bold yellow]PEAK INVESTIGATION LOOP[/]", expand=False))
-    console.print("[dim](Enter an m/q value to search for matching isotopes)[/]")
-    console.print()
-
-    mq_input = Prompt.ask(
-        "Enter [bold yellow]m/q[/] value\n  [cyan]f[/] : Final evaluation\n  [red]q[/] : Quit\n",
-        default="f",
-    ).lower()
-
-    if mq_input == "q":
-        break
-    if mq_input == "f":
-        break
-
-    if mq_input == "f":
-        break
-
-    try:
-        target_mq = float(mq_input)
-    except ValueError:
-        print("Invalid input. Please enter a number.")
-        continue
-
-    # Verification step
-    suggested_candidates = []
-    nearest_idx = None
-    peak_mqs = csd.m_over_q[peaks] if csd.m_over_q is not None else np.array([])
-    if len(peak_mqs) > 0:
-        nearest_idx = peaks[np.argmin(np.abs(peak_mqs - target_mq))]
-        peak_mq = float(csd.m_over_q[nearest_idx]) if csd.m_over_q is not None else 0.0
-        peak_current = (
-            float(csd.beam_current[nearest_idx]) if csd.beam_current is not None else 0.0
-        )
-
-        # Show target marker
+        # Verification step
         verify_ev = ElementEvaluation(
             "TARGET",
             0,
@@ -314,7 +246,7 @@ while True:
             np.array([peak_current]),
             np.array([int(nearest_idx)]),
         )
-        refresh_plot(csd, identified_evaluations, verify_ev, highlight_label="TARGET PEAK")
+        self.refresh_plot(verify_ev, highlight_label="TARGET PEAK")
 
         console.print()
         console.print(f"Targeting: [bold magenta]m/q = {peak_mq:.3f}[/]")
@@ -329,111 +261,93 @@ while True:
         console.print()
 
         if ans == "n":
-            continue
+            return
         if ans == "q":
-            break
+            return
 
-        # Check for user suggestion
+        suggested_candidates = []
         if ans != "y":
-            matches = lookup_isotopes(ans, isotopes)
+            matches = lookup_isotopes(ans, self.isotopes)
             for _, isotope in matches.iterrows():
                 mass = float(cast(Any, isotope["m"]))
                 best_q = int(np.round(mass / peak_mq))
                 if 1 <= best_q <= int(cast(Any, isotope["z"])):
-                    ev = create_evaluation(isotope, csd, peaks)
+                    ev = create_evaluation(isotope, self.csd, self.peaks)
                     if nearest_idx in ev.peak_indices:
                         suggested_candidates.append(ev)
 
-        target_mq = peak_mq  # Use actual peak m/q for candidate matching
+        # Find other candidates
+        candidates = []
+        for charge in range(1, 31):
+            target_mass = peak_mq * charge
+            matches = self.isotopes[
+                (self.isotopes["m"] > target_mass - 0.5) & (self.isotopes["m"] < target_mass + 0.5)
+            ]
+            for _, isotope in matches.iterrows():
+                if charge > int(cast(Any, isotope["z"])):
+                    continue
+                found_peaks = find_element_peaks(
+                    self.peaks, self.csd, float(cast(Any, isotope["m"]))
+                )
+                if nearest_idx in found_peaks:
+                    ev = create_evaluation(isotope, self.csd, self.peaks)
+                    if not any(c.symbol() == ev.symbol() for c in candidates):
+                        candidates.append(ev)
 
-    # Find candidates near this m/q
-    candidates = []
-    for charge in range(1, 31):  # Search up to q=30
-        target_mass = target_mq * charge
-        # Find isotopes with mass near target_mass
-        matches = isotopes[
-            (isotopes["m"] > target_mass - 0.5) & (isotopes["m"] < target_mass + 0.5)
+        if not candidates and not suggested_candidates:
+            console.print(f"[bold yellow]No candidates found for m/q {peak_mq:.3f}.[/]")
+            Prompt.ask("Press Enter to continue")
+            return
+
+        max_mq = float(self.csd.m_over_q.max())
+        candidates.sort(key=lambda x: (x.score(max_mq), x.a), reverse=True)
+        final_candidates = suggested_candidates + [
+            c
+            for c in candidates
+            if not any(sc.symbol() == c.symbol() for sc in suggested_candidates)
         ]
-        for _, isotope in matches.iterrows():
-            z_val = int(cast(Any, isotope["z"]))
-            if charge > z_val:
-                continue  # Skip non-physical candidates (charge > atomic number)
 
-            found_peaks = find_element_peaks(peaks, csd, isotope["m"])
-            # Ensure the targeted peak is among the found peaks for this isotope
-            if nearest_idx is not None and nearest_idx in found_peaks:
-                ev = create_evaluation(isotope, csd, peaks)
-                if not any(c.symbol() == ev.symbol() for c in candidates):
-                    candidates.append(ev)
-
-    if not candidates and not suggested_candidates:
-        console.print(f"[bold yellow]No candidates found for m/q {target_mq}.[/]")
-        Prompt.ask("Press Enter to continue")
-        continue
-
-    # Prioritize suggested candidates and sort the rest
-    max_mq = float(csd.m_over_q.max()) if csd.m_over_q is not None else 0.0
-    candidates.sort(key=lambda x: (x.score(max_mq), x.a), reverse=True)
-
-    # Merge suggested and found candidates, removing duplicates
-    final_candidates = suggested_candidates.copy()
-    for cand in candidates:
-        if not any(sc.symbol() == cand.symbol() for sc in suggested_candidates):
-            final_candidates.append(cand)
-
-    idx = 0
-    while idx < len(final_candidates):
-        cand = final_candidates[idx]
-        refresh_plot(csd, identified_evaluations, cand)
-
-        console.print()
-        console.print(
-            Panel(
-                f"[bold cyan]INVESTIGATING m/q {target_mq:.3f}[/]\n"
-                f"Candidate [bold]{idx + 1}/{len(final_candidates)}[/]: [bold green]{cand.symbol()}[/]",
-                expand=False,
+        idx = 0
+        while idx < len(final_candidates):
+            cand = final_candidates[idx]
+            self.refresh_plot(cand)
+            console.print(
+                Panel(
+                    f"[bold cyan]INVESTIGATING m/q {peak_mq:.3f}[/]\nCandidate [bold]{idx + 1}/{len(final_candidates)}[/]: [bold green]{cand.symbol()}[/]",
+                    expand=False,
+                )
             )
-        )
+            console.print(
+                f"  [bold]y[/] : Accept {cand.symbol()}\n  [bold]n[/] : Reject\n  [bold]m[/] : Maybe\n  [bold]s[/] : Skip\n  [bold]e[/] : End\n"
+            )
+            ans = Prompt.ask("Action", choices=["y", "n", "m", "e", "s"], default="y").lower()
+            console.print()
 
-        console.print(
-            f"  [bold]y[/] : Accept {cand.symbol()}\n"
-            f"  [bold]n[/] : Reject (don't show again)\n"
-            f"  [bold]m[/] : Maybe (save for final selection)\n"
-            f"  [bold]s[/] : Skip (show next candidate)\n"
-            f"  [bold]e[/] : End (stop searching for this peak)\n"
-        )
+            if ans == "y":
+                self.identified_peak_indices.update(cand.peak_indices)
+                self.identified_evaluations.append(cand)
+                break
+            elif ans == "e":
+                break
+            elif ans == "m":
+                self.maybe_evaluations.append(cand)
+                idx += 1
+            elif ans == "n":
+                self.no_evaluations.append(cand)
+                idx += 1
+            elif ans == "s":
+                idx += 1
 
-        ans = Prompt.ask("Action", choices=["y", "n", "m", "e", "s"], default="y").lower()
-        console.print()
+    def run_final_review(self) -> List[ElementEvaluation]:
+        clear_output(wait=True)
+        console.print(Panel("[bold green]Final Evaluation Review[/]"))
+        all_options = self.identified_evaluations + self.maybe_evaluations
+        unique_options = list({ev.symbol(): ev for ev in all_options}.values())
 
-        if ans == "y":
-            identified_peak_indices.update(cand.peak_indices)
-            identified_evaluations.append(cand)
-            break
-        elif ans == "e":
-            break
-        elif ans == "m":
-            maybe_evaluations.append(cand)
-            idx += 1
-        elif ans == "n":
-            no_evaluations.append(cand)
-            idx += 1
-        elif ans == "s":
-            idx += 1
-        else:
-            print("Invalid input. Use y/n/m/e/s.")
+        if not unique_options:
+            console.print("[yellow]No elements identified.[/]")
+            return []
 
-# 5. Final evaluation review
-if mq_input != "q":
-    clear_output(wait=True)
-    console.print(Panel("[bold green]Final Evaluation Review[/]"))
-
-    all_options = identified_evaluations + maybe_evaluations
-    unique_options = {ev.symbol(): ev for ev in all_options}.values()
-
-    final_selections = []
-    options_list = list(unique_options)
-    if options_list:
         table = Table(title="Candidates for Final Selection")
         table.add_column("Index", style="cyan", justify="right")
         table.add_column("Symbol", style="bold green")
@@ -441,33 +355,66 @@ if mq_input != "q":
         table.add_column("Abundance (%)", style="yellow", justify="right")
         table.add_column("Status", style="blue")
 
-        max_mq = float(csd.m_over_q.max()) if csd.m_over_q is not None else 0.0
-        for i, ev in enumerate(options_list):
-            status = "Identified" if ev in identified_evaluations else "Maybe"
+        max_mq = float(self.csd.m_over_q.max())
+        for i, ev in enumerate(unique_options):
+            status = "Identified" if ev in self.identified_evaluations else "Maybe"
             table.add_row(str(i), ev.symbol(), f"{ev.score(max_mq):.2f}", f"{ev.a:.1f}", status)
 
         console.print(table)
-
         sel_input = Prompt.ask(
-            "Select elements to include in final evaluation ([bold cyan]comma-separated indices[/] or [bold white]empty for defaults[/])",
+            "Select indices for final evaluation (comma-separated or empty for defaults)",
             default="",
         )
+
         if sel_input:
             try:
                 indices = [int(x.strip()) for x in sel_input.split(",") if x.strip().isdigit()]
-                final_selections = [options_list[i] for i in indices if 0 <= i < len(options_list)]
-            except (ValueError, IndexError):
-                console.print("[red]Invalid selections, using current identified list.[/]")
-                final_selections = identified_evaluations
+                final_selections = [
+                    unique_options[i] for i in indices if 0 <= i < len(unique_options)
+                ]
+            except:
+                final_selections = self.identified_evaluations
         else:
-            final_selections = identified_evaluations
-    else:
-        final_selections = identified_evaluations
+            final_selections = self.identified_evaluations
 
-    console.print(Panel("[bold green]Final Elements for Evaluation[/]"))
-    for ev in final_selections:
-        console.print(f"  • [bold green]{ev.symbol()}[/] (Mass: {ev.m}, Z: {ev.z})")
+        console.print(Panel("[bold green]Final Elements for Evaluation[/]"))
+        for ev in final_selections:
+            console.print(f"  • [bold green]{ev.symbol()}[/] (Mass: {ev.m}, Z: {ev.z})")
 
-    refresh_plot(csd, final_selections)
-    console.print("\n[bold green]Evaluation complete.[/]")
-    plt.show(block=True)
+        self.refresh_plot(None)
+        for ev in final_selections:
+            plt.plot(ev.m_over_q, ev.current, "x", label=ev.symbol())
+        plt.legend()
+        plt.show(block=True)
+        return final_selections
+
+
+def identify_peaks(
+    csd: Any, isotopes_df: Optional[pd.DataFrame] = None
+) -> List[ElementEvaluation]:
+    """
+    Perform interactive peak identification on a CSD.
+
+    Returns a list of selected ElementEvaluation objects.
+    """
+    session = PeakIdentifier(csd, isotopes_df)
+    session.setup_persistent_elements()
+    status = session.run_investigation()
+    if status == "quit":
+        return []
+    return session.run_final_review()
+
+
+if __name__ == "__main__":
+    # Example usage
+    from ops.ecris.analysis.io import read_csd_from_file_pair
+
+    csd_path = Path("/home/work/repos/ops/ecris.analysis/data/csds/csd_1762894074")
+    if csd_path.exists():
+        csd = read_csd_from_file_pair(csd_path)
+        # Initial fit for m/q estimation if needed
+        csd.m_over_q, _ = polynomial_fit_mq(
+            csd, [Element("O", "Oxygen", 16, 8)], polynomial_order=4
+        )
+        results = identify_peaks(csd)
+        print(f"Identified {len(results)} elements.")
