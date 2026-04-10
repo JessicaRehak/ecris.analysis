@@ -235,6 +235,7 @@ while True:
         continue
 
     # Verification step
+    suggested_candidates = []
     peak_mqs = csd.m_over_q[peaks] if csd.m_over_q is not None else np.array([])
     if len(peak_mqs) > 0:
         nearest_idx = peaks[np.argmin(np.abs(peak_mqs - target_mq))]
@@ -256,7 +257,9 @@ while True:
         refresh_plot(csd, identified_evaluations, verify_ev, highlight_label="TARGET PEAK")
 
         ans = (
-            input(f"Investigate peak at m/q = {peak_mq:.3f}? (y: yes, n: no/retry, q: quit): ")
+            input(
+                f"Investigate peak at m/q = {peak_mq:.3f}? (y: yes, n: no/retry, q: quit, or enter symbol like 'Ar-40'): "
+            )
             .strip()
             .lower()
         )
@@ -264,6 +267,40 @@ while True:
             continue
         if ans == "q":
             break
+
+        # Check for user suggestion
+        if ans != "y":
+            suggestion = ans.upper()
+            if "-" in suggestion:
+                parts = suggestion.split("-")
+                symbol = parts[0]
+                try:
+                    mass_num = int(parts[1])
+                    matches = isotopes[(isotopes["s"] == symbol) & (isotopes.index == mass_num)]
+                except (ValueError, IndexError):
+                    matches = isotopes[0:0]
+            else:
+                symbol = suggestion
+                matches = isotopes[isotopes["s"] == symbol]
+
+            for _, isotope in matches.iterrows():
+                mass = float(cast(Any, isotope["m"]))
+                best_q = int(np.round(mass / peak_mq))
+                if 1 <= best_q <= int(cast(Any, isotope["z"])):
+                    found_peaks = find_element_peaks(peaks, csd, mass)
+                    ev = ElementEvaluation(
+                        str(isotope["s"]),
+                        int(np.round(mass)),
+                        int(cast(Any, isotope["z"])),
+                        float(cast(Any, isotope["a"])),
+                        csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
+                        csd.beam_current[found_peaks]
+                        if csd.beam_current is not None
+                        else np.array([]),
+                        found_peaks,
+                    )
+                    suggested_candidates.append(ev)
+
         target_mq = peak_mq  # Use actual peak m/q for candidate matching
 
     # Find candidates near this m/q
@@ -306,16 +343,23 @@ while True:
                     if not any(c.symbol() == ev.symbol() for c in candidates):
                         candidates.append(ev)
 
-    if not candidates:
+    if not candidates and not suggested_candidates:
         print(f"No candidates found for m/q {target_mq}.")
         input("Press Enter to continue...")
         continue
 
+    # Prioritize suggested candidates and sort the rest
     candidates.sort(key=lambda x: (len(x.peak_indices), x.a), reverse=True)
 
+    # Merge suggested and found candidates, removing duplicates
+    final_candidates = suggested_candidates.copy()
+    for cand in candidates:
+        if not any(sc.symbol() == cand.symbol() for sc in suggested_candidates):
+            final_candidates.append(cand)
+
     idx = 0
-    while idx < len(candidates):
-        cand = candidates[idx]
+    while idx < len(final_candidates):
+        cand = final_candidates[idx]
         refresh_plot(csd, identified_evaluations, cand)
         ans = (
             input(f"Accept {cand.symbol()}? (y: yes, n: no, m: maybe, s: skip/next): ")
