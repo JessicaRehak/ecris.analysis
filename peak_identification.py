@@ -78,6 +78,37 @@ class ElementEvaluation:
         return f"{self.s}-{self.m}"
 
 
+def lookup_isotopes(query: str, isotopes_df: pd.DataFrame) -> Any:
+    """Lookup isotopes for a given query like 'Ar' or 'Ar-40'."""
+    query = query.strip()
+    if "-" in query:
+        parts = query.split("-")
+        symbol = parts[0].capitalize()
+        try:
+            mass_num = int(parts[1])
+            return isotopes_df[(isotopes_df["s"] == symbol) & (isotopes_df.index == mass_num)]
+        except (ValueError, IndexError):
+            return isotopes_df[0:0]
+    else:
+        symbol = query.capitalize()
+        return isotopes_df[isotopes_df["s"] == symbol]
+
+
+def create_evaluation(isotope: Any, csd: Any, peaks: np.ndarray) -> ElementEvaluation:
+    """Create an ElementEvaluation for a given isotope."""
+    mass = float(cast(Any, isotope["m"]))
+    found_peaks = find_element_peaks(peaks, csd, mass)
+    return ElementEvaluation(
+        str(isotope["s"]),
+        int(np.round(mass)),
+        int(cast(Any, isotope["z"])),
+        float(cast(Any, isotope["a"])),
+        csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
+        csd.beam_current[found_peaks] if csd.beam_current is not None else np.array([]),
+        found_peaks,
+    )
+
+
 def get_evals(peaks, csd, isotopes_to_exclude, identified_peak_indices, min_abundance=25):
     evaluations = []
     excluded_z = [v[0] for v in isotopes_to_exclude]
@@ -136,18 +167,7 @@ known_elements_input = input(
 known_symbols = [s.strip() for s in known_elements_input.split(",") if s.strip()]
 
 for item in known_symbols:
-    if "-" in item:
-        parts = item.split("-")
-        symbol = parts[0]
-        try:
-            mass_num = int(parts[1])
-            matches = isotopes[(isotopes["s"] == symbol) & (isotopes.index == mass_num)]
-        except (ValueError, IndexError):
-            print(f"Warning: Invalid format or mass number for '{item}'.")
-            continue
-    else:
-        symbol = item
-        matches = isotopes[isotopes["s"] == symbol]
+    matches = lookup_isotopes(item, isotopes)
 
     if matches.empty:
         print(f"Warning: Symbol '{item}' not found in isotopes data.")
@@ -270,35 +290,12 @@ while True:
 
         # Check for user suggestion
         if ans != "y":
-            suggestion = ans.upper()
-            if "-" in suggestion:
-                parts = suggestion.split("-")
-                symbol = parts[0]
-                try:
-                    mass_num = int(parts[1])
-                    matches = isotopes[(isotopes["s"] == symbol) & (isotopes.index == mass_num)]
-                except (ValueError, IndexError):
-                    matches = isotopes[0:0]
-            else:
-                symbol = suggestion
-                matches = isotopes[isotopes["s"] == symbol]
-
+            matches = lookup_isotopes(ans, isotopes)
             for _, isotope in matches.iterrows():
                 mass = float(cast(Any, isotope["m"]))
                 best_q = int(np.round(mass / peak_mq))
                 if 1 <= best_q <= int(cast(Any, isotope["z"])):
-                    found_peaks = find_element_peaks(peaks, csd, mass)
-                    ev = ElementEvaluation(
-                        str(isotope["s"]),
-                        int(np.round(mass)),
-                        int(cast(Any, isotope["z"])),
-                        float(cast(Any, isotope["a"])),
-                        csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
-                        csd.beam_current[found_peaks]
-                        if csd.beam_current is not None
-                        else np.array([]),
-                        found_peaks,
-                    )
+                    ev = create_evaluation(isotope, csd, peaks)
                     suggested_candidates.append(ev)
 
         target_mq = peak_mq  # Use actual peak m/q for candidate matching
@@ -323,23 +320,7 @@ while True:
                     for p in found_peaks
                     if csd.m_over_q is not None
                 ):
-                    # Extract values explicitly as scalars
-                    s_val = str(isotope["s"])
-                    m_val = int(np.round(float(cast(Any, isotope["m"]))))
-                    z_val = int(cast(Any, isotope["z"]))
-                    a_val = float(cast(Any, isotope["a"]))
-
-                    ev = ElementEvaluation(
-                        s_val,
-                        m_val,
-                        z_val,
-                        a_val,
-                        csd.m_over_q[found_peaks] if csd.m_over_q is not None else np.array([]),
-                        csd.beam_current[found_peaks]
-                        if csd.beam_current is not None
-                        else np.array([]),
-                        found_peaks,
-                    )
+                    ev = create_evaluation(isotope, csd, peaks)
                     if not any(c.symbol() == ev.symbol() for c in candidates):
                         candidates.append(ev)
 
